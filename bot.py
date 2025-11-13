@@ -218,9 +218,12 @@ async def check_commits():
 # Commands
 @bot.event
 async def on_ready():
+    print("--------------------------------------------------")
     print(f"✅ Bot logged in as {bot.user.name}")
     print(f"📊 Monitoring {len(bot_data['repos'])} repositories")
     check_commits.start()
+    print("🟢 CHECK_COMMITS LOOP HAS BEEN STARTED!")
+    print("--------------------------------------------------")
 
 
 @bot.command(name="help")
