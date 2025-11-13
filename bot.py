@@ -32,7 +32,7 @@ CONFIG = {
     "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN", "YOUR_GITHUB_TOKEN"),
     "CHANNEL_ID": int(os.getenv("CHANNEL_ID", "0")),
     "CHECK_INTERVAL": 60,  # seconds
-    "ADMIN_ROLE_NAME": "Bot Admin",  # Role name for admins (Note: Role check is no longer used)
+    # Removed: "ADMIN_ROLE_NAME": "Bot Admin",
 }
 
 # Data storage
@@ -65,6 +65,9 @@ def load_data():
                 if repo not in data.get("repos", []):
                     data["repos"].append(repo)
                     print(f"✅ Added default repo: {repo}")
+            # Ensure 'admins' key exists, though it's now redundant
+            if "admins" not in data:
+                data["admins"] = []
             return data
     except (FileNotFoundError, json.JSONDecodeError):
         # Initialize with default repos if file not found or corrupted/empty
@@ -76,7 +79,8 @@ def load_data():
             )
 
         default_repos = load_default_repos()
-        return {"repos": default_repos.copy(), "last_commits": {}, "admins": []}
+        # Removed 'admins' from the default structure as it's no longer used/managed
+        return {"repos": default_repos.copy(), "last_commits": {}}
 
 
 def save_data(data):
@@ -186,9 +190,6 @@ async def check_commits():
                 save_data(bot_data)
 
 
-# NOTE: The is_admin(ctx) function has been removed as per the user's request.
-
-
 # Commands
 @bot.event
 async def on_ready():
@@ -206,29 +207,19 @@ async def help_command(ctx):
     )
 
     embed.add_field(
-        name="📋 General Commands (All Users)",
+        name="📋 Commands (All Users)",
         value=(
             "`/help` - Show this help message\n"
             "`/uptime` - Show bot uptime\n"
             "`/listrepos` - List all monitored repositories\n"
-            "`/adminlist` - List all bot admins"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="⚙️ Management Commands (All Users)",
-        value=(
             "`/addrepo <owner/repo>` - Add a repository to monitor\n"
             "`/removerepo <owner/repo>` - Remove a repository\n"
-            "`/addadmin @user` - Add a bot admin\n"
-            "`/removeadmin @user` - Remove a bot admin\n"
             "`/setchannel` - Set current channel for notifications"
         ),
         inline=False,
     )
 
-    embed.set_footer(text="Admin checks have been disabled for all commands.")
+    embed.set_footer(text="All commands are accessible to all users.")
     await ctx.send(embed=embed)
 
 
@@ -248,26 +239,7 @@ async def uptime_command(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="adminlist")
-async def adminlist_command(ctx):
-    embed = discord.Embed(
-        title="👑 Bot Administrators (Currently just a stored list)", color=0xFFA500
-    )
-
-    admin_mentions = []
-    for admin_id in bot_data["admins"]:
-        try:
-            user = await bot.fetch_user(admin_id)
-            admin_mentions.append(f"• {user.mention} ({user.name})")
-        except discord.NotFound:
-            admin_mentions.append(f"• User ID `{admin_id}` (Not Found)")
-
-    if admin_mentions:
-        embed.description = "\n".join(admin_mentions)
-    else:
-        embed.description = "No admins have been explicitly added."
-
-    await ctx.send(embed=embed)
+# Removed: @bot.command(name="adminlist") as it served no purpose without admin logic.
 
 
 @bot.command(name="listrepos")
@@ -297,8 +269,6 @@ async def listrepos_command(ctx):
 
 @bot.command(name="addrepo")
 async def addrepo_command(ctx, repo: str = None):
-    # Admin check removed
-
     if not repo:
         await ctx.send("❌ Please provide a repository in format: `owner/repo`")
         return
@@ -324,8 +294,6 @@ async def addrepo_command(ctx, repo: str = None):
 
 @bot.command(name="removerepo")
 async def removerepo_command(ctx, repo: str = None):
-    # Admin check removed
-
     if not repo:
         await ctx.send("❌ Please provide a repository in format: `owner/repo`")
         return
@@ -353,50 +321,8 @@ async def removerepo_command(ctx, repo: str = None):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="addadmin")
-async def addadmin_command(ctx, member: discord.Member = None):
-    # Admin check removed
-
-    if not member:
-        await ctx.send("❌ Please mention a user to add as admin!")
-        return
-
-    if member.id in bot_data["admins"]:
-        await ctx.send(f"⚠️ {member.mention} is already an admin!")
-        return
-
-    bot_data["admins"].append(member.id)
-    save_data(bot_data)
-
-    await ctx.send(
-        f"✅ {member.mention} has been added as a bot admin (in the data file)!"
-    )
-
-
-@bot.command(name="removeadmin")
-async def removeadmin_command(ctx, member: discord.Member = None):
-    # Admin check removed
-
-    if not member:
-        await ctx.send("❌ Please mention a user to remove from admins!")
-        return
-
-    if member.id not in bot_data["admins"]:
-        await ctx.send(f"⚠️ {member.mention} is not an admin!")
-        return
-
-    bot_data["admins"].remove(member.id)
-    save_data(bot_data)
-
-    await ctx.send(
-        f"✅ {member.mention} has been removed from bot admins (in the data file)!"
-    )
-
-
 @bot.command(name="setchannel")
 async def setchannel_command(ctx):
-    # Admin check removed
-
     # NOTE: This only saves to the in-memory CONFIG. For persistence across restarts,
     # you should save this value to bot_data.json as well.
     CONFIG["CHANNEL_ID"] = ctx.channel.id
