@@ -1,119 +1,104 @@
+import os
+import json
+import asyncio
+import aiohttp
 import discord
 from discord.ext import commands, tasks
-import aiohttp
-import json
-import os
-from datetime import datetime
-from threading import Thread
-import sys
-
-# Third-party libraries (Flask for keep-alive)
+from discord import Embed
 from flask import Flask
+from threading import Thread
 
-# --- CONFIGURATION ---
-
+# --------------------------------------------------
+#                    CONFIG
+# --------------------------------------------------
 CONFIG = {
     "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN"),
     "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN"),
-    # Read CHANNEL_ID as int. It will be 0 if not set.
-    "CHANNEL_ID": int(os.getenv("CHANNEL_ID", "1438551192786440355")),
-    "CHECK_INTERVAL": 60,  # seconds
+    "CHANNEL_ID": int(os.getenv("CHANNEL_ID")),
+    "CHECK_INTERVAL": int(os.getenv("CHECK_INTERVAL", 300)),
+    "DATA_FILE": "bot_data.json",
 }
 
-# Data storage files
-DATA_FILE = "bot_data.json"
-DEFAULT_REPOS_FILE = "default_repos.json"
+bot_data = {"repos": [], "latest_commits": {}}
 
-
-# --- KEEP-ALIVE (FLASK) ---
-
-app = Flask(__name__)
+# --------------------------------------------------
+#                    FLASK KEEP-ALIVE
+# --------------------------------------------------
+app = Flask("keep_alive")
 
 
 @app.route("/")
 def home():
-    return "Bot is alive!"
+    return "✅ GitHub Watcher Discord Bot is Running!"
 
 
-def run_flask():
-    """Runs the Flask web server in a thread."""
+def run_web():
     app.run(host="0.0.0.0", port=8080)
 
 
 def keep_alive():
-    """Starts the Flask server thread."""
-    t = Thread(target=run_flask)
+    t = Thread(target=run_web)
     t.start()
 
 
-# --- DATA PERSISTENCE ---
+# --------------------------------------------------
+#                    DISCORD BOT SETUP
+# --------------------------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
 
 
-def load_default_repos():
-    """Load default repositories from config file."""
-    try:
-        with open(DEFAULT_REPOS_FILE, "r") as f:
-            data = json.load(f)
-            return data.get("default_repos", [])
-    except (FileNotFoundError, json.JSONDecodeError):
-        print(f"⚠️ Error with {DEFAULT_REPOS_FILE} or not found, using empty defaults.")
-        return []
+# --------------------------------------------------
+#                    UTILITIES
+# --------------------------------------------------
+def save_data():
+    with open(CONFIG["DATA_FILE"], "w") as f:
+        json.dump(bot_data, f, indent=2)
 
 
 def load_data():
-    """Load bot data from JSON file, initializing if not found or corrupted."""
-    default_structure = {"repos": load_default_repos().copy(), "last_commits": {}}
-
-    try:
-        with open(DATA_FILE, "r") as f:
-            data = json.load(f)
-
-            # Ensure the structure keys exist
-            data.setdefault("repos", [])
-            data.setdefault("last_commits", {})
-
-            # Add default repos if missing from loaded data
-            for repo in default_structure["repos"]:
-                if repo not in data["repos"]:
-                    data["repos"].append(repo)
-                    print(f"✅ Added default repo: {repo}")
-
-            return data
-
-    except (FileNotFoundError, json.JSONDecodeError):
-        # Initialize if file not found or corrupted/empty
-        log_msg = f"⚠️ {DATA_FILE} not found or corrupted, initializing new data."
-        print(log_msg)
-
-        return default_structure
+    global bot_data
+    if os.path.exists(CONFIG["DATA_FILE"]):
+        try:
+            with open(CONFIG["DATA_FILE"], "r") as f:
+                bot_data = json.load(f)
+            # Ensure backward compatibility
+            if "repos" not in bot_data:
+                bot_data["repos"] = []
+            if "latest_commits" not in bot_data:
+                bot_data["latest_commits"] = {}
+        except Exception as e:
+            print(f"⚠️ Failed to load data file: {e}")
+            bot_data = {"repos": [], "latest_commits": {}}
+    else:
+        bot_data = {"repos": [], "latest_commits": {}}
 
 
-def save_data(data):
-    """Save bot data to JSON file (w mode)."""
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def create_commit_embed(commit, repo):
+    sha = commit["sha"][:7]
+    msg = commit["commit"]["message"]
+    author = commit["commit"]["author"]["name"]
+    url = commit["html_url"]
+
+    embed = Embed(title=f"🌀 New Commit in {repo}", color=0x3498DB)
+    embed.add_field(name="Message", value=msg[:256], inline=False)
+    embed.add_field(name="Author", value=author, inline=True)
+    embed.add_field(name="SHA", value=f"`{sha}`", inline=True)
+    embed.add_field(name="URL", value=f"[View Commit]({url})", inline=False)
+    return embed
 
 
-# --- BOT INITIALIZATION ---
-
-intents = discord.Intents.default()
-# MUST be enabled in Discord Developer Portal for commands to work
-intents.message_content = True
-
-bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
-start_time = datetime.now()
-bot_data = load_data()
-
-
-# --- GITHUB LOGIC ---
-
-
+# --------------------------------------------------
+#                    GITHUB FETCH
+# --------------------------------------------------
 async def fetch_commits(session, repo):
-    """Fetches the latest commits from a GitHub repository."""
+    """Fetch the latest commits from a GitHub repository."""
     try:
         headers = {}
         if CONFIG["GITHUB_TOKEN"] and CONFIG["GITHUB_TOKEN"] != "YOUR_GITHUB_TOKEN":
-            headers["Authorization"] = f"token {CONFIG['GITHUB_TOKEN']}"
+            headers["Authorization"] = f"Bearer {CONFIG['GITHUB_TOKEN']}"
+            headers["X-GitHub-Api-Version"] = "2022-11-28"
 
         url = f"https://api.github.com/repos/{repo}/commits"
         async with session.get(
@@ -122,9 +107,8 @@ async def fetch_commits(session, repo):
             if response.status == 200:
                 return await response.json()
             elif response.status == 401:
-                # Log the specific 401 error
                 print(
-                    f"🔴 [GITHUB] Error fetching {repo}: 401 Bad credentials. Check GITHUB_TOKEN."
+                    f"🔴 [GITHUB] Unauthorized (401) for {repo}. Check your GITHUB_TOKEN."
                 )
                 return []
             else:
@@ -137,318 +121,160 @@ async def fetch_commits(session, repo):
         return []
 
 
-def create_commit_embed(commit, repo):
-    """Creates a Discord embed for a new commit."""
-    timestamp = datetime.fromisoformat(
-        commit["commit"]["author"]["date"].replace("Z", "+00:00")
-    )
-
-    embed = discord.Embed(
-        title=f"📝 New Commit to {repo}",
-        url=commit["html_url"],
-        color=0x0366D6,
-        description=commit["commit"]["message"][:300],
-        timestamp=timestamp,
-    )
-
-    author = commit.get("author", {})
-    embed.set_author(
-        name=commit["commit"]["author"]["name"], icon_url=author.get("avatar_url", "")
-    )
-
-    embed.add_field(name="SHA", value=f"`{commit['sha'][:7]}`", inline=True)
-    embed.add_field(name="Branch", value="main", inline=True)
-    embed.set_footer(text=f"Repository: {repo}")
-
-    return embed
-
-
-# --- BOT TASKS ---
-
-
+# --------------------------------------------------
+#                    TASK LOOP
+# --------------------------------------------------
 @tasks.loop(seconds=CONFIG["CHECK_INTERVAL"])
-async def check_commits():
-    """Periodically checks monitored GitHub repos for new commits."""
-
-    channel_id = CONFIG["CHANNEL_ID"]
-    if channel_id == 0:
-        print("🔴 [LOOP] Skipping check: CHANNEL_ID is 0. Use /setchannel.")
+async def check_for_new_commits():
+    if not bot_data["repos"]:
         return
 
-    # 1. Channel Retrieval (with fetch_channel fallback)
-    channel = bot.get_channel(channel_id)
-
-    if not channel:
-        try:
-            # Fallback: Attempt to fetch the channel directly via API
-            channel = await bot.fetch_channel(channel_id)
-            print(
-                f"🟡 [LOOP] Channel ID {channel_id} fetched successfully via API call."
-            )
-        except discord.errors.NotFound:
-            print(
-                f"🔴 [LOOP] Skipping check: Channel ID {channel_id} not found on Discord. Check bot's server membership/permissions."
-            )
-            return
-        except Exception as e:
-            print(f"🔴 [LOOP] Skipping check: Error fetching channel {channel_id}: {e}")
-            return
-
-    # Check if the fetched object is a TextChannel (or similar, like a Forum or Stage channel)
-    if not isinstance(channel, discord.TextChannel):
-        print(
-            f"🔴 [LOOP] Skipping check: Channel {channel_id} is not a valid text channel for sending embeds."
-        )
-        return
-
-    print(
-        f"🟢 [LOOP] Starting commit check for {len(bot_data['repos'])} repos at {datetime.now().strftime('%H:%M:%S')}"
-    )
-
+    print("🔍 Checking for new commits...")
     async with aiohttp.ClientSession() as session:
         for repo in bot_data["repos"]:
             commits = await fetch_commits(session, repo)
-            print(f"🟢 [REPO:{repo}] Fetched {len(commits)} commits.")
-
             if not commits:
                 continue
 
-            latest_commit_sha = commits[0]["sha"]
-            last_saved_sha = bot_data["last_commits"].get(repo)
+            latest_sha = commits[0]["sha"]
+            last_stored_sha = bot_data["latest_commits"].get(repo)
 
-            # Commit Tracking Logic
-
-            if not last_saved_sha:
-                bot_data["last_commits"][repo] = latest_commit_sha
-                save_data(bot_data)
-                print(
-                    f"🟡 [REPO:{repo}] Initializing tracking with SHA: {latest_commit_sha[:7]}. Skipping notification."
-                )
-                continue
-
-            if last_saved_sha != latest_commit_sha:
-                print(
-                    f"🔔 [REPO:{repo}] NEW COMMIT DETECTED! Old: {last_saved_sha[:7]}, New: {latest_commit_sha[:7]}"
-                )
-
-                new_commits = []
-                for commit in commits:
-                    if commit["sha"] == last_saved_sha:
-                        break
-                    new_commits.append(commit)
-
-                print(f"   - Found {len(new_commits)} new commits.")
-
-                # Send embeds (oldest first)
-                for commit in reversed(new_commits):
-                    embed = create_commit_embed(commit, repo)
+            if latest_sha != last_stored_sha:
+                channel = bot.get_channel(CONFIG["CHANNEL_ID"])
+                if channel:
+                    embed = create_commit_embed(commits[0], repo)
                     await channel.send(embed=embed)
-
-                # Update tracking
-                bot_data["last_commits"][repo] = latest_commit_sha
-                save_data(bot_data)
-                print(f"🟢 [REPO:{repo}] Notified and updated SHA.")
-
-            else:
-                print(f"🔵 [REPO:{repo}] No new commits. SHA is: {last_saved_sha[:7]}.")
+                bot_data["latest_commits"][repo] = latest_sha
+                save_data()
 
 
-# --- BOT EVENTS AND COMMANDS ---
+# --------------------------------------------------
+#                    COMMANDS
+# --------------------------------------------------
+@bot.command(name="addrepo")
+async def add_repo(ctx, repo_name: str):
+    """Add a repository to monitor."""
+    if repo_name in bot_data["repos"]:
+        await ctx.send(f"⚠️ Repository `{repo_name}` is already being monitored.")
+        return
+    bot_data["repos"].append(repo_name)
+    save_data()
+    await ctx.send(f"✅ Added `{repo_name}` to monitoring list.")
 
 
-@bot.event
-async def on_ready():
-    """Fires when the bot is ready and connected to Discord."""
-    print("--------------------------------------------------")
-    print(f"✅ Bot logged in as {bot.user.name}")
-    print(f"📊 Monitoring {len(bot_data['repos'])} repositories")
+@bot.command(name="removerepo")
+async def remove_repo(ctx, repo_name: str):
+    """Remove a repository from monitoring."""
+    if repo_name not in bot_data["repos"]:
+        await ctx.send(f"⚠️ Repository `{repo_name}` is not in the list.")
+        return
+    bot_data["repos"].remove(repo_name)
+    bot_data["latest_commits"].pop(repo_name, None)
+    save_data()
+    await ctx.send(f"✅ Removed `{repo_name}` from monitoring list.")
 
-    # Check if the token is the default placeholder, but the bot is running
-    if CONFIG["GITHUB_TOKEN"] == "YOUR_GITHUB_TOKEN":
-        print("🔴 WARNING: GITHUB_TOKEN is placeholder, API calls will fail with 401.")
 
-    check_commits.start()
-    print("🟢 CHECK_COMMITS LOOP HAS BEEN STARTED!")
-    print("--------------------------------------------------")
+@bot.command(name="listrepos")
+async def list_repos(ctx):
+    """List all monitored repositories."""
+    if not bot_data["repos"]:
+        await ctx.send("ℹ️ No repositories are being monitored.")
+        return
+    msg = "\n".join([f"• `{r}`" for r in bot_data["repos"]])
+    await ctx.send(f"📦 **Currently Monitored Repositories:**\n{msg}")
+
+
+@bot.command(name="latestcommits")
+async def latestcommits_command(ctx, repo: str = None):
+    """Show latest commits for a repo or all repos."""
+    async with aiohttp.ClientSession() as session:
+        if repo:
+            if repo not in bot_data["repos"]:
+                await ctx.send(f"⚠️ `{repo}` is not being monitored.")
+                return
+            repos = [repo]
+        else:
+            repos = bot_data["repos"]
+
+        if not repos:
+            await ctx.send("❌ No repositories are being monitored.")
+            return
+
+        await ctx.send(
+            f"🔍 Fetching latest commits for `{len(repos)}` repository(ies)..."
+        )
+
+        for repo_name in repos:
+            commits = await fetch_commits(session, repo_name)
+            if not commits:
+                await ctx.send(f"⚠️ No commits found for `{repo_name}`.")
+                continue
+            for commit in commits[: 3 if not repo else 5]:
+                embed = create_commit_embed(commit, repo_name)
+                await ctx.send(embed=embed)
 
 
 @bot.command(name="help")
 async def help_command(ctx):
-    """Shows the bot's help message."""
-    embed = discord.Embed(
-        title="🤖 GitHub Commit Bot - Help",
-        color=0x5865F2,
-        description="Monitor GitHub repositories and get commit notifications. All commands are public.",
-    )
-
+    """Show help for available commands."""
+    embed = Embed(title="🛠️ GitHub Watcher Bot Commands", color=0x00FFAA)
     embed.add_field(
-        name="📋 General Commands",
-        value=(
-            "`/help` - Show this help message\n"
-            "`/uptime` - Show bot uptime\n"
-            "`/listrepos` - List all monitored repositories"
-        ),
+        name="/addrepo <user/repo>",
+        value="Start monitoring a GitHub repo.",
         inline=False,
     )
-
     embed.add_field(
-        name="⚙️ Management Commands",
-        value=(
-            "`/addrepo <owner/repo>` - Add a repository to monitor\n"
-            "`/removerepo <owner/repo>` - Remove a repository\n"
-            "`/setchannel` - Set current channel for notifications"
-        ),
+        name="/removerepo <user/repo>", value="Stop monitoring a repo.", inline=False
+    )
+    embed.add_field(
+        name="/listrepos", value="List all currently monitored repos.", inline=False
+    )
+    embed.add_field(
+        name="/latestcommits [user/repo]",
+        value="Show recent commits (specific or all).",
         inline=False,
     )
-
+    embed.add_field(name="/help", value="Display this help message.", inline=False)
     await ctx.send(embed=embed)
 
 
-@bot.command(name="uptime")
-async def uptime_command(ctx):
-    """Shows how long the bot has been running."""
-    uptime = datetime.now() - start_time
-    days = uptime.days
-    hours, remainder = divmod(uptime.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-
-    embed = discord.Embed(
-        title="⏱️ Bot Uptime",
-        color=0x00FF00,
-        description=f"**{days}d {hours}h {minutes}m {seconds}s**",
-    )
-    embed.add_field(name="Started", value=start_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
-    await ctx.send(embed=embed)
+# --------------------------------------------------
+#                    EVENTS
+# --------------------------------------------------
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user} ({bot.user.id})")
+    load_data()
+    if CONFIG["CHANNEL_ID"]:
+        check_for_new_commits.start()
+    print("📡 Bot is now monitoring GitHub repositories.")
 
 
-@bot.command(name="listrepos")
-async def listrepos_command(ctx):
-    """Lists all repositories currently being monitored."""
-    embed = discord.Embed(title="📚 Monitored Repositories", color=0x0366D6)
-
-    if bot_data["repos"]:
-        default_repos = load_default_repos()
-        repo_lines = []
-        for repo in bot_data["repos"]:
-            is_default = " 🔒 (default)" if repo in default_repos else ""
-            repo_lines.append(f"• `{repo}`{is_default}")
-        embed.description = "\n".join(repo_lines)
-        embed.add_field(
-            name="ℹ️ Info",
-            value="Repos marked with 🔒 are default repos and cannot be removed.",
-            inline=False,
-        )
-    else:
-        embed.description = "No repositories being monitored yet."
-
-    embed.set_footer(text=f"Total: {len(bot_data['repos'])} repositories")
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="addrepo")
-async def addrepo_command(ctx, repo: str = None):
-    """Adds a GitHub repository to the monitoring list."""
-    if not repo:
-        await ctx.send("❌ Please provide a repository in format: `owner/repo`")
-        return
-
-    if "/" not in repo or repo.count("/") != 1:
-        await ctx.send("❌ Invalid format! Use: `owner/repo`")
-        return
-
-    if repo in bot_data["repos"]:
-        await ctx.send(f"⚠️ Repository `{repo}` is already being monitored!")
-        return
-
-    bot_data["repos"].append(repo)
-    save_data(bot_data)
-
-    embed = discord.Embed(
-        title="✅ Repository Added",
-        description=f"Now monitoring: `{repo}`",
-        color=0x00FF00,
-    )
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="removerepo")
-async def removerepo_command(ctx, repo: str = None):
-    """Removes a repository from the monitoring list."""
-    if not repo:
-        await ctx.send("❌ Please provide a repository in format: `owner/repo`")
-        return
-
-    if repo not in bot_data["repos"]:
-        await ctx.send(f"⚠️ Repository `{repo}` is not being monitored!")
-        return
-
-    # Check if it's a default repo
-    default_repos = load_default_repos()
-    if repo in default_repos:
-        await ctx.send(f"❌ Cannot remove `{repo}` - it's a default repository!")
-        return
-
-    bot_data["repos"].remove(repo)
-    # Also remove its last commit SHA
-    bot_data["last_commits"].pop(repo, None)
-    save_data(bot_data)
-
-    embed = discord.Embed(
-        title="✅ Repository Removed",
-        description=f"Stopped monitoring: `{repo}`",
-        color=0xFF0000,
-    )
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="setchannel")
-async def setchannel_command(ctx):
-    """Sets the current channel as the destination for commit notifications."""
-
-    # NOTE: This only saves to the in-memory CONFIG. For persistence across restarts,
-    # you would need to save this value to bot_data.json and update load_data/CONFIG.
-    CONFIG["CHANNEL_ID"] = ctx.channel.id
-
-    embed = discord.Embed(
-        title="✅ Channel Set",
-        description=f"Commit notifications will be sent to {ctx.channel.mention}",
-        color=0x00FF00,
-    )
-    await ctx.send(embed=embed)
-
-
-# --- STARTUP ---
-
+# --------------------------------------------------
+#                    STARTUP CHECKS
+# --------------------------------------------------
 if __name__ == "__main__":
-    # --------------------------------------------------
-    # ADDED: Printing Configuration for Testing
-    # --------------------------------------------------
+    keep_alive()
+
     print("--------------------------------------------------")
-    print("          STARTUP CONFIGURATION CHECK             ")
+    print("          STARTUP CONFIGURATION CHECK")
     print("--------------------------------------------------")
 
-    # Discord Token (Masked for security)
+    def mask_token(token):
+        if not token:
+            return "(NOT SET)"
+        return f"***{token[-4:]}" if len(token) > 4 else "***"
+
     dt = CONFIG["DISCORD_TOKEN"]
-    print(f"DISCORD_TOKEN: {'***' + dt[-4:] if len(dt) > 4 else dt}")
-
-    # GitHub Token (Masked for security)
     gt = CONFIG["GITHUB_TOKEN"]
-    is_placeholder = "(PLACEHOLDER)" if gt == "YOUR_GITHUB_TOKEN" else ""
-    print(f"GITHUB_TOKEN:  {'***' + gt[-4:] if len(gt) > 4 else gt} {is_placeholder}")
-
-    # Channel ID
     cid = CONFIG["CHANNEL_ID"]
-    status = "(NOT SET/0)" if cid == 0 else "(OK)"
-    print(f"CHANNEL_ID:    {cid} {status}")
+
+    print(f"DISCORD_TOKEN: {mask_token(dt)}")
+    print(f"GITHUB_TOKEN:  {mask_token(gt)}")
+    print(f"CHANNEL_ID:    {cid if cid else '(NOT SET)'}")
     print(f"CHECK_INTERVAL:{CONFIG['CHECK_INTERVAL']} seconds")
 
-    print("--------------------------------------------------")
-
-    # --- GitHub Token Validation (Re-enabled for visibility) ---
-    if CONFIG["GITHUB_TOKEN"] == "YOUR_GITHUB_TOKEN":
-        print("FATAL: GITHUB_TOKEN is placeholder. API calls will fail with 401.")
-        # sys.exit(1) # Uncomment this to force a crash if placeholder is used
-
-    # --- Keep Alive and Bot Run ---
-    keep_alive()
-    bot.run(CONFIG["DISCORD_TOKEN"])
+    if not dt:
+        print("❌ ERROR: DISCORD_TOKEN not set!")
+    else:
+        bot.run(dt)
