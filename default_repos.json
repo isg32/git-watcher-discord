@@ -1,0 +1,7 @@
+{
+  "default_repos": [
+    "bugswriter-ai/mcphub",
+    "bugswriter-ai/aisys",
+    "bugswriter-ai/chatui"
+  ]
+}
