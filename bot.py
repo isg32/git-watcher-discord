@@ -17,6 +17,7 @@ def home():
 
 
 def run_flask():
+    # Note: Flask's default port is 5000, 8080 is often used in container/hosting environments
     app.run(host="0.0.0.0", port=8080)
 
 
@@ -31,7 +32,7 @@ CONFIG = {
     "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN", "YOUR_GITHUB_TOKEN"),
     "CHANNEL_ID": int(os.getenv("CHANNEL_ID", "0")),
     "CHECK_INTERVAL": 60,  # seconds
-    "ADMIN_ROLE_NAME": "Bot Admin",  # Role name for admins
+    "ADMIN_ROLE_NAME": "Bot Admin",  # Role name for admins (Note: Role check is no longer used)
 }
 
 # Data storage
@@ -54,37 +55,40 @@ def load_default_repos():
 
 
 def load_data():
+    """Load bot data from JSON file, initializing if not found or corrupted."""
     try:
         with open(DATA_FILE, "r") as f:
             data = json.load(f)
-            # Add default repos logic (rest of your existing logic)
+            # Add default repos if not already present
             default_repos = load_default_repos()
             for repo in default_repos:
-                if repo not in data["repos"]:
+                if repo not in data.get("repos", []):
                     data["repos"].append(repo)
                     print(f"✅ Added default repo: {repo}")
             return data
-    except FileNotFoundError:
-        # Initialize if file doesn't exist
-        print(f"⚠️ {DATA_FILE} not found, initializing new data.")
-        default_repos = load_default_repos()
-        return {"repos": default_repos.copy(), "last_commits": {}, "admins": []}
-    except json.JSONDecodeError:  # <--- NEW: Catch error for empty/corrupted file
-        # Initialize if file is corrupted/empty
-        print(
-            f"⚠️ Error parsing {DATA_FILE} (Corrupted or Empty), initializing new data."
-        )
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Initialize with default repos if file not found or corrupted/empty
+        if not os.path.exists(DATA_FILE):
+            print(f"⚠️ {DATA_FILE} not found, initializing new data.")
+        else:
+            print(
+                f"⚠️ Error parsing {DATA_FILE} (Corrupted or Empty), initializing new data."
+            )
+
         default_repos = load_default_repos()
         return {"repos": default_repos.copy(), "last_commits": {}, "admins": []}
 
 
 def save_data(data):
-    with open(DATA_FILE, "r") as f:
+    """Save bot data to JSON file."""
+    # FIX: Changed 'r' (read) to 'w' (write) mode.
+    with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 
 # Initialize bot
 intents = discord.Intents.default()
+# Note: Message Content Intent must be enabled in the Discord Developer Portal
 intents.message_content = True
 bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
 
@@ -158,7 +162,7 @@ async def check_commits():
             latest_commit = commits[0]
             last_sha = bot_data["last_commits"].get(repo)
 
-            # Initialize tracking
+            # Initialize tracking (skips notification on first check)
             if not last_sha:
                 bot_data["last_commits"][repo] = latest_commit["sha"]
                 save_data(bot_data)
@@ -167,6 +171,7 @@ async def check_commits():
             # Check for new commits
             if last_sha != latest_commit["sha"]:
                 new_commits = []
+                # Find all new commits between last_sha and latest_commit
                 for commit in commits:
                     if commit["sha"] == last_sha:
                         break
@@ -181,13 +186,7 @@ async def check_commits():
                 save_data(bot_data)
 
 
-# Check if user is admin
-def is_admin(ctx):
-    if ctx.author.id in bot_data["admins"]:
-        return True
-
-    role = discord.utils.get(ctx.author.roles, name=CONFIG["ADMIN_ROLE_NAME"])
-    return role is not None
+# NOTE: The is_admin(ctx) function has been removed as per the user's request.
 
 
 # Commands
@@ -207,7 +206,7 @@ async def help_command(ctx):
     )
 
     embed.add_field(
-        name="📋 General Commands",
+        name="📋 General Commands (All Users)",
         value=(
             "`/help` - Show this help message\n"
             "`/uptime` - Show bot uptime\n"
@@ -218,7 +217,7 @@ async def help_command(ctx):
     )
 
     embed.add_field(
-        name="⚙️ Admin Commands",
+        name="⚙️ Management Commands (All Users)",
         value=(
             "`/addrepo <owner/repo>` - Add a repository to monitor\n"
             "`/removerepo <owner/repo>` - Remove a repository\n"
@@ -229,7 +228,7 @@ async def help_command(ctx):
         inline=False,
     )
 
-    embed.set_footer(text="Admin permissions required for admin commands")
+    embed.set_footer(text="Admin checks have been disabled for all commands.")
     await ctx.send(embed=embed)
 
 
@@ -251,19 +250,22 @@ async def uptime_command(ctx):
 
 @bot.command(name="adminlist")
 async def adminlist_command(ctx):
-    embed = discord.Embed(title="👑 Bot Administrators", color=0xFFA500)
+    embed = discord.Embed(
+        title="👑 Bot Administrators (Currently just a stored list)", color=0xFFA500
+    )
 
     admin_mentions = []
     for admin_id in bot_data["admins"]:
-        user = await bot.fetch_user(admin_id)
-        admin_mentions.append(f"• {user.mention} ({user.name})")
+        try:
+            user = await bot.fetch_user(admin_id)
+            admin_mentions.append(f"• {user.mention} ({user.name})")
+        except discord.NotFound:
+            admin_mentions.append(f"• User ID `{admin_id}` (Not Found)")
 
     if admin_mentions:
         embed.description = "\n".join(admin_mentions)
     else:
-        embed.description = (
-            "No admins added yet. Users with 'Bot Admin' role can use admin commands."
-        )
+        embed.description = "No admins have been explicitly added."
 
     await ctx.send(embed=embed)
 
@@ -295,9 +297,7 @@ async def listrepos_command(ctx):
 
 @bot.command(name="addrepo")
 async def addrepo_command(ctx, repo: str = None):
-    if not is_admin(ctx):
-        await ctx.send("❌ You need admin permissions to use this command!")
-        return
+    # Admin check removed
 
     if not repo:
         await ctx.send("❌ Please provide a repository in format: `owner/repo`")
@@ -324,9 +324,7 @@ async def addrepo_command(ctx, repo: str = None):
 
 @bot.command(name="removerepo")
 async def removerepo_command(ctx, repo: str = None):
-    if not is_admin(ctx):
-        await ctx.send("❌ You need admin permissions to use this command!")
-        return
+    # Admin check removed
 
     if not repo:
         await ctx.send("❌ Please provide a repository in format: `owner/repo`")
@@ -357,9 +355,7 @@ async def removerepo_command(ctx, repo: str = None):
 
 @bot.command(name="addadmin")
 async def addadmin_command(ctx, member: discord.Member = None):
-    if not is_admin(ctx):
-        await ctx.send("❌ You need admin permissions to use this command!")
-        return
+    # Admin check removed
 
     if not member:
         await ctx.send("❌ Please mention a user to add as admin!")
@@ -372,14 +368,14 @@ async def addadmin_command(ctx, member: discord.Member = None):
     bot_data["admins"].append(member.id)
     save_data(bot_data)
 
-    await ctx.send(f"✅ {member.mention} has been added as a bot admin!")
+    await ctx.send(
+        f"✅ {member.mention} has been added as a bot admin (in the data file)!"
+    )
 
 
 @bot.command(name="removeadmin")
 async def removeadmin_command(ctx, member: discord.Member = None):
-    if not is_admin(ctx):
-        await ctx.send("❌ You need admin permissions to use this command!")
-        return
+    # Admin check removed
 
     if not member:
         await ctx.send("❌ Please mention a user to remove from admins!")
@@ -392,15 +388,17 @@ async def removeadmin_command(ctx, member: discord.Member = None):
     bot_data["admins"].remove(member.id)
     save_data(bot_data)
 
-    await ctx.send(f"✅ {member.mention} has been removed from bot admins!")
+    await ctx.send(
+        f"✅ {member.mention} has been removed from bot admins (in the data file)!"
+    )
 
 
 @bot.command(name="setchannel")
 async def setchannel_command(ctx):
-    if not is_admin(ctx):
-        await ctx.send("❌ You need admin permissions to use this command!")
-        return
+    # Admin check removed
 
+    # NOTE: This only saves to the in-memory CONFIG. For persistence across restarts,
+    # you should save this value to bot_data.json as well.
     CONFIG["CHANNEL_ID"] = ctx.channel.id
 
     embed = discord.Embed(
