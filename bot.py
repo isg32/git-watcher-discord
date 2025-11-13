@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime
 from threading import Thread
+import sys
 
 # Third-party libraries (Flask for keep-alive)
 from flask import Flask
@@ -12,9 +13,10 @@ from flask import Flask
 # --- CONFIGURATION ---
 
 CONFIG = {
-    "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN", "YOUR_DISCORD_TOKEN"),
-    "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN", "YOUR_GITHUB_TOKEN"),
-    "CHANNEL_ID": int(os.getenv("CHANNEL_ID", "0")),
+    "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN"),
+    "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN"),
+    # Read CHANNEL_ID as int. It will be 0 if not set.
+    "CHANNEL_ID": int(os.getenv("CHANNEL_ID", "1438551192786440355")),
     "CHECK_INTERVAL": 60,  # seconds
 }
 
@@ -54,12 +56,12 @@ def load_default_repos():
             data = json.load(f)
             return data.get("default_repos", [])
     except (FileNotFoundError, json.JSONDecodeError):
-        print(f"⚠️ Error with {DEFAULT_REPOS_FILE}, using empty defaults.")
+        print(f"⚠️ Error with {DEFAULT_REPOS_FILE} or not found, using empty defaults.")
         return []
 
 
 def load_data():
-    """Load bot data from JSON file (r mode), initializing if not found or corrupted."""
+    """Load bot data from JSON file, initializing if not found or corrupted."""
     default_structure = {"repos": load_default_repos().copy(), "last_commits": {}}
 
     try:
@@ -67,10 +69,8 @@ def load_data():
             data = json.load(f)
 
             # Ensure the structure keys exist
-            if "repos" not in data:
-                data["repos"] = []
-            if "last_commits" not in data:
-                data["last_commits"] = {}
+            data.setdefault("repos", [])
+            data.setdefault("last_commits", {})
 
             # Add default repos if missing from loaded data
             for repo in default_structure["repos"]:
@@ -97,7 +97,7 @@ def save_data(data):
 # --- BOT INITIALIZATION ---
 
 intents = discord.Intents.default()
-# This must be enabled in the Discord Developer Portal for commands to work
+# MUST be enabled in Discord Developer Portal for commands to work
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
@@ -121,6 +121,12 @@ async def fetch_commits(session, repo):
         ) as response:
             if response.status == 200:
                 return await response.json()
+            elif response.status == 401:
+                # Log the specific 401 error
+                print(
+                    f"🔴 [GITHUB] Error fetching {repo}: 401 Bad credentials. Check GITHUB_TOKEN."
+                )
+                return []
             else:
                 print(
                     f"🔴 [GITHUB] Error fetching {repo}: {response.status} - {await response.text()}"
@@ -164,15 +170,34 @@ def create_commit_embed(commit, repo):
 async def check_commits():
     """Periodically checks monitored GitHub repos for new commits."""
 
-    # Check A: Channel ID Verification
-    if CONFIG["CHANNEL_ID"] == 0:
+    channel_id = CONFIG["CHANNEL_ID"]
+    if channel_id == 0:
         print("🔴 [LOOP] Skipping check: CHANNEL_ID is 0. Use /setchannel.")
         return
 
-    channel = bot.get_channel(CONFIG["CHANNEL_ID"])
+    # 1. Channel Retrieval (with fetch_channel fallback)
+    channel = bot.get_channel(channel_id)
+
     if not channel:
+        try:
+            # Fallback: Attempt to fetch the channel directly via API
+            channel = await bot.fetch_channel(channel_id)
+            print(
+                f"🟡 [LOOP] Channel ID {channel_id} fetched successfully via API call."
+            )
+        except discord.errors.NotFound:
+            print(
+                f"🔴 [LOOP] Skipping check: Channel ID {channel_id} not found on Discord. Check bot's server membership/permissions."
+            )
+            return
+        except Exception as e:
+            print(f"🔴 [LOOP] Skipping check: Error fetching channel {channel_id}: {e}")
+            return
+
+    # Check if the fetched object is a TextChannel (or similar, like a Forum or Stage channel)
+    if not isinstance(channel, discord.TextChannel):
         print(
-            f"🔴 [LOOP] Skipping check: Could not find channel with ID {CONFIG['CHANNEL_ID']}."
+            f"🔴 [LOOP] Skipping check: Channel {channel_id} is not a valid text channel for sending embeds."
         )
         return
 
@@ -182,20 +207,17 @@ async def check_commits():
 
     async with aiohttp.ClientSession() as session:
         for repo in bot_data["repos"]:
-            # Check B: GitHub Fetch
             commits = await fetch_commits(session, repo)
             print(f"🟢 [REPO:{repo}] Fetched {len(commits)} commits.")
 
             if not commits:
                 continue
 
-            latest_commit = commits[0]
-            latest_commit_sha = latest_commit["sha"]
+            latest_commit_sha = commits[0]["sha"]
             last_saved_sha = bot_data["last_commits"].get(repo)
 
-            # Check C: Commit Tracking
+            # Commit Tracking Logic
 
-            # 1. Initialize tracking (skips notification on first check)
             if not last_saved_sha:
                 bot_data["last_commits"][repo] = latest_commit_sha
                 save_data(bot_data)
@@ -204,14 +226,12 @@ async def check_commits():
                 )
                 continue
 
-            # 2. Check for new commits
             if last_saved_sha != latest_commit_sha:
-                print(f"🔔 [REPO:{repo}] NEW COMMIT DETECTED!")
-                print(f"   - Old SHA: {last_saved_sha[:7]}")
-                print(f"   - New SHA: {latest_commit_sha[:7]}")
+                print(
+                    f"🔔 [REPO:{repo}] NEW COMMIT DETECTED! Old: {last_saved_sha[:7]}, New: {latest_commit_sha[:7]}"
+                )
 
                 new_commits = []
-                # Find all new commits between last_saved_sha and latest_commit
                 for commit in commits:
                     if commit["sha"] == last_saved_sha:
                         break
@@ -242,6 +262,11 @@ async def on_ready():
     print("--------------------------------------------------")
     print(f"✅ Bot logged in as {bot.user.name}")
     print(f"📊 Monitoring {len(bot_data['repos'])} repositories")
+
+    # Check if the token is the default placeholder, but the bot is running
+    if CONFIG["GITHUB_TOKEN"] == "YOUR_GITHUB_TOKEN":
+        print("🔴 WARNING: GITHUB_TOKEN is placeholder, API calls will fail with 401.")
+
     check_commits.start()
     print("🟢 CHECK_COMMITS LOOP HAS BEEN STARTED!")
     print("--------------------------------------------------")
@@ -395,5 +420,35 @@ async def setchannel_command(ctx):
 # --- STARTUP ---
 
 if __name__ == "__main__":
+    # --------------------------------------------------
+    # ADDED: Printing Configuration for Testing
+    # --------------------------------------------------
+    print("--------------------------------------------------")
+    print("          STARTUP CONFIGURATION CHECK             ")
+    print("--------------------------------------------------")
+
+    # Discord Token (Masked for security)
+    dt = CONFIG["DISCORD_TOKEN"]
+    print(f"DISCORD_TOKEN: {'***' + dt[-4:] if len(dt) > 4 else dt}")
+
+    # GitHub Token (Masked for security)
+    gt = CONFIG["GITHUB_TOKEN"]
+    is_placeholder = "(PLACEHOLDER)" if gt == "YOUR_GITHUB_TOKEN" else ""
+    print(f"GITHUB_TOKEN:  {'***' + gt[-4:] if len(gt) > 4 else gt} {is_placeholder}")
+
+    # Channel ID
+    cid = CONFIG["CHANNEL_ID"]
+    status = "(NOT SET/0)" if cid == 0 else "(OK)"
+    print(f"CHANNEL_ID:    {cid} {status}")
+    print(f"CHECK_INTERVAL:{CONFIG['CHECK_INTERVAL']} seconds")
+
+    print("--------------------------------------------------")
+
+    # --- GitHub Token Validation (Re-enabled for visibility) ---
+    if CONFIG["GITHUB_TOKEN"] == "YOUR_GITHUB_TOKEN":
+        print("FATAL: GITHUB_TOKEN is placeholder. API calls will fail with 401.")
+        # sys.exit(1) # Uncomment this to force a crash if placeholder is used
+
+    # --- Keep Alive and Bot Run ---
     keep_alive()
     bot.run(CONFIG["DISCORD_TOKEN"])
