@@ -149,16 +149,25 @@ def create_commit_embed(commit, repo):
 # Check for new commits
 @tasks.loop(seconds=CONFIG["CHECK_INTERVAL"])
 async def check_commits():
+    # --- Check A: Channel ID Verification ---
     if CONFIG["CHANNEL_ID"] == 0:
+        print("🔴 [LOOP] Skipping check: CHANNEL_ID is 0.")
         return
 
     channel = bot.get_channel(CONFIG["CHANNEL_ID"])
     if not channel:
+        print(
+            f"🔴 [LOOP] Skipping check: Could not find channel with ID {CONFIG['CHANNEL_ID']}."
+        )
         return
+
+    print(f"🟢 [LOOP] Starting commit check for {len(bot_data['repos'])} repos.")
 
     async with aiohttp.ClientSession() as session:
         for repo in bot_data["repos"]:
+            # --- Check B: GitHub Fetch ---
             commits = await fetch_commits(session, repo)
+            print(f"🟢 [REPO:{repo}] Fetched {len(commits)} commits.")
 
             if not commits:
                 continue
@@ -166,14 +175,23 @@ async def check_commits():
             latest_commit = commits[0]
             last_sha = bot_data["last_commits"].get(repo)
 
+            # --- Check C: Commit Tracking ---
+
             # Initialize tracking (skips notification on first check)
             if not last_sha:
                 bot_data["last_commits"][repo] = latest_commit["sha"]
                 save_data(bot_data)
+                print(
+                    f"🟡 [REPO:{repo}] Initializing tracking with SHA: {latest_commit['sha'][:7]}. Skipping notification."
+                )
                 continue
 
             # Check for new commits
             if last_sha != latest_commit["sha"]:
+                print(f"🔔 [REPO:{repo}] NEW COMMIT DETECTED!")
+                print(f"   - Old SHA: {last_sha[:7]}")
+                print(f"   - New SHA: {latest_commit['sha'][:7]}")
+
                 new_commits = []
                 # Find all new commits between last_sha and latest_commit
                 for commit in commits:
@@ -181,13 +199,20 @@ async def check_commits():
                         break
                     new_commits.append(commit)
 
+                print(f"   - Found {len(new_commits)} new commits.")
+
                 # Send embeds (oldest first)
                 for commit in reversed(new_commits):
                     embed = create_commit_embed(commit, repo)
-                    await channel.send(embed=embed)
+                    # await channel.send(embed=embed) # <-- Keep this line, it sends the message
+                    pass  # Placeholder if you don't want to send for now.
 
                 bot_data["last_commits"][repo] = latest_commit["sha"]
                 save_data(bot_data)
+                print(f"🟢 [REPO:{repo}] Notified and updated SHA.")
+
+            else:
+                print(f"🔵 [REPO:{repo}] No new commits. SHA is: {last_sha[:7]}.")
 
 
 # Commands
